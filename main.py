@@ -30,8 +30,12 @@ TITLE = "Galaxy Shooter"
 
 # --- Spieler -----------------------------------------------------------------
 PLAYER_LIVES = 3                   # Start-Leben
-PLAYER_SIZE = 76                   # Sprite-Größe in Pixel
+PLAYER_SIZE = 76                   # Sprite-Größe der Grundstufe in Pixel
 PLAYER_HIT_RADIUS = 17             # Hitbox (kleiner als das Sprite = fairer)
+# Schiff-Upgrade: ab diesen Leveln wird das Schiff größer und sieht cooler aus
+PLAYER_TIER_LEVELS = (3, 5, 7, 9)  # Stufe 1 ab Lv3, Stufe 2 ab Lv5, ...
+PLAYER_SIZE_PER_TIER = 9           # so viele Pixel wächst das Schiff pro Stufe
+PLAYER_HIT_PER_TIER = 1.5          # Hitbox wächst nur minimal mit
 PLAYER_MAX_SPEED = 640.0           # max. Geschwindigkeit in px/s
 PLAYER_RESPONSE = 9.0              # Trägheit: kleiner = träger/schwammiger
 MOUSE_FOLLOW = 7.0                 # wie stark das Schiff der Maus hinterherzieht
@@ -56,12 +60,29 @@ FIRE_RATE_MIN_COOLDOWN = 0.10      # schneller als das wird nie geschossen
 # --- Gegner-Spawning ---------------------------------------------------------
 WAVE_START_DELAY = 1.0             # Sekunden bis zur ersten Welle
 WAVE_INTERVAL_BASE = 2.2           # Sekunden zwischen Wellen auf Level 1
-WAVE_INTERVAL_DECAY = 0.08         # pro Level kürzer
-WAVE_INTERVAL_MIN = 0.8            # kürzer wird es nie
-MAX_ENEMIES = 40                   # Obergrenze gleichzeitiger Gegner
-ENEMY_SPEED_PER_LEVEL = 0.04       # +4 % Tempo pro Level
-ENEMY_SPEED_CAP = 1.8              # max. Tempo-Faktor
-ENEMY_HP_EVERY_N_LEVELS = 4        # alle N Level +1 Lebenspunkt für Gegner
+WAVE_INTERVAL_DECAY = 0.10         # pro Level kürzer
+WAVE_INTERVAL_MIN = 0.6            # kürzer wird es nie
+MAX_ENEMIES = 60                   # Obergrenze gleichzeitiger Gegner
+ENEMY_SPEED_PER_LEVEL = 0.05       # +5 % Tempo pro Level
+ENEMY_SPEED_CAP = 2.0              # max. Tempo-Faktor
+ENEMY_HP_PER_LEVEL = 0.18          # +18 % Lebenspunkte pro Level
+WAVE_COUNT_PER_LEVELS = 6          # alle N Level kommt eine zusätzliche Welle gleichzeitig
+WAVE_COUNT_MAX = 3                 # max. gleichzeitige Wellen
+WAVE_SIZE_MAX = 8                  # max. Gegner pro Reihe/Formation
+
+# Gegner-Schüsse: ab welchem Level, Cooldown (s), Muster
+# straight = nach unten, aimed = auf den Spieler, spread = Fächer auf den Spieler
+ENEMY_FIRE = {
+    "grunt":  dict(unlock=2, cooldown=3.4, pattern="straight"),   # ab Lv6 "aimed"
+    "zigzag": dict(unlock=3, cooldown=2.9, pattern="aimed"),
+    "tank":   dict(unlock=4, cooldown=2.4, pattern="spread"),
+}
+ENEMY_BULLET_SPEED = 330.0         # Basis-Tempo der Gegner-Schüsse
+ENEMY_BULLET_SPEED_PER_LEVEL = 0.03
+ENEMY_BULLET_SPEED_CAP = 1.7
+ENEMY_FIRE_RATE_PER_LEVEL = 0.06   # Gegner schießen pro Level 6 % öfter
+ENEMY_FIRE_RATE_CAP = 2.2
+MAX_ENEMY_BULLETS = 140
 
 # Gegnertypen: hp = Lebenspunkte, speed = px/s, size = Pixel, points = Score,
 # unlock = ab diesem Level tauchen sie auf, weight = Spawn-Häufigkeit
@@ -203,23 +224,71 @@ def rr(W, H, x, y, w, h):
 # =============================================================================
 # SPRITE-ZEICHNER (prozedural, Koordinaten relativ 0..1)
 # =============================================================================
-def draw_player(s, W, H):
+def player_tier(level):
+    """Schiff-Stufe (0..4) abhängig vom Level."""
+    return sum(1 for lv in PLAYER_TIER_LEVELS if level >= lv)
+
+
+def player_size(tier):
+    return PLAYER_SIZE + PLAYER_SIZE_PER_TIER * tier
+
+
+# Farben pro Stufe: (Flügel, Flügelrand, Akzent)
+TIER_COLORS = [
+    ((40, 110, 255), (150, 225, 255), MAGENTA),
+    ((40, 140, 255), (160, 235, 255), (255, 110, 230)),
+    ((110, 70, 255), (190, 170, 255), (80, 255, 230)),
+    ((200, 50, 230), (255, 170, 250), YELLOW),
+    ((255, 170, 40), (255, 235, 150), (255, 80, 60)),
+]
+
+
+def draw_player(s, W, H, tier=0):
     P = lambda pts: [(x * W, y * H) for x, y in pts]
     mirror = lambda pts: [(1 - x, y) for x, y in pts]
+    both = lambda pts: (pts, mirror(pts))
     lw = max(2, int(W * 0.025))
-    wing = [(0.40, 0.42), (0.02, 0.80), (0.05, 0.97), (0.24, 0.90), (0.40, 0.80)]
-    for w in (wing, mirror(wing)):
-        pygame.draw.polygon(s, (40, 110, 255), P(w))
-        pygame.draw.polygon(s, (150, 225, 255), P(w), lw)
-    # Wing-Spitzen in Magenta
-    for tip in ([(0.02, 0.80), (0.05, 0.97), (0.12, 0.93), (0.10, 0.84)],):
-        pygame.draw.polygon(s, MAGENTA, P(tip))
-        pygame.draw.polygon(s, MAGENTA, P(mirror(tip)))
+    wing_c, rim_c, acc_c = TIER_COLORS[tier]
+    # Stufe 4: große Energieflügel ganz hinten
+    if tier >= 4:
+        for w in both([(0.40, 0.30), (0.0, 0.46), (0.0, 0.70), (0.12, 0.62), (0.40, 0.66)]):
+            pygame.draw.polygon(s, (255, 120, 40), P(w))
+            pygame.draw.polygon(s, (255, 230, 150), P(w), lw)
+    # Hauptflügel (ab Stufe 1 breiter)
+    wide = 0.012 * tier
+    wing = [(0.40, 0.42), (0.02 - wide, 0.80), (0.05 - wide, 0.97), (0.24, 0.90), (0.40, 0.80)]
+    for w in both(wing):
+        pygame.draw.polygon(s, wing_c, P(w))
+        pygame.draw.polygon(s, rim_c, P(w), lw)
+    for tip in both([(0.02 - wide, 0.80), (0.05 - wide, 0.97), (0.12, 0.93), (0.10, 0.84)]):
+        pygame.draw.polygon(s, acc_c, P(tip))
+    # Stufe 2: hintere Seitenflossen
+    if tier >= 2:
+        for w in both([(0.36, 0.70), (0.14, 0.99), (0.32, 0.99)]):
+            pygame.draw.polygon(s, wing_c, P(w))
+            pygame.draw.polygon(s, rim_c, P(w), lw)
+    # Stufe 3: Canards (kleine Vorderflügel)
+    if tier >= 3:
+        for w in both([(0.42, 0.22), (0.18, 0.36), (0.42, 0.40)]):
+            pygame.draw.polygon(s, acc_c, P(w))
+            pygame.draw.polygon(s, WHITE, P(w), max(1, lw // 2))
+    # Stufe 1: Waffenpods an den Flügeln (leuchtende Mündungen)
+    if tier >= 1:
+        for cx in (0.17, 0.83):
+            pygame.draw.ellipse(s, (60, 70, 110), rr(W, H, cx - 0.045, 0.52, 0.09, 0.34))
+            pygame.draw.ellipse(s, rim_c, rr(W, H, cx - 0.045, 0.52, 0.09, 0.34), max(1, lw // 2))
+            pygame.draw.circle(s, acc_c, (int(cx * W), int(0.55 * H)), int(W * 0.035))
+    # Rumpf
     body = [(0.5, 0.02), (0.60, 0.30), (0.65, 0.62), (0.58, 0.88),
             (0.5, 0.80), (0.42, 0.88), (0.35, 0.62), (0.40, 0.30)]
-    pygame.draw.polygon(s, (205, 225, 250), P(body))
-    pygame.draw.polygon(s, (120, 200, 255), P(body), lw)
-    pygame.draw.polygon(s, (60, 130, 230), P([(0.5, 0.10), (0.56, 0.32), (0.5, 0.30), (0.44, 0.32)]))
+    body_c = [(205, 225, 250), (215, 230, 255), (225, 215, 255), (250, 220, 250), (255, 240, 200)][tier]
+    pygame.draw.polygon(s, body_c, P(body))
+    pygame.draw.polygon(s, rim_c, P(body), lw)
+    pygame.draw.polygon(s, wing_c, P([(0.5, 0.10), (0.56, 0.32), (0.5, 0.30), (0.44, 0.32)]))
+    if tier >= 2:                                   # Rumpfstreifen
+        pygame.draw.line(s, acc_c, (0.5 * W, 0.40 * H), (0.5 * W, 0.80 * H), max(2, lw))
+    if tier >= 4:                                   # Krone an der Nase
+        pygame.draw.polygon(s, YELLOW, P([(0.5, 0.0), (0.54, 0.09), (0.5, 0.07), (0.46, 0.09)]))
     pygame.draw.ellipse(s, (20, 40, 90), rr(W, H, 0.43, 0.30, 0.14, 0.26))
     pygame.draw.ellipse(s, CYAN, rr(W, H, 0.455, 0.325, 0.09, 0.19))
     pygame.draw.ellipse(s, WHITE, rr(W, H, 0.47, 0.34, 0.03, 0.07))
@@ -495,6 +564,27 @@ class Bullet:
         pygame.draw.ellipse(surf, WHITE, (x - r // 2, y - r, max(2, r), int(r * 2)))
 
 
+class EnemyBullet:
+    """Schuss der Gegner (rot/orange, damit er nicht mit deinen cyan Schüssen verwechselt wird)."""
+    radius = 7
+
+    def __init__(self, pos, direction, speed):
+        self.pos = Vector2(pos)
+        self.vel = Vector2(direction) * speed
+        self.alive = True
+
+    def update(self, dt):
+        self.pos += self.vel * dt
+        if not (-40 < self.pos.x < WIDTH + 40 and -40 < self.pos.y < HEIGHT + 40):
+            self.alive = False
+
+    def draw(self, surf):
+        x, y = int(self.pos.x), int(self.pos.y)
+        draw_glow(surf, (x, y), 24, (255, 60, 40))
+        pygame.draw.circle(surf, (255, 90, 60), (x, y), self.radius)
+        pygame.draw.circle(surf, (255, 235, 200), (x, y), self.radius - 3)
+
+
 def weapon_for_level(level):
     """Gibt (Schussliste, Cooldown, Glow) zurück.
     Schuss = (x-Versatz, Winkel in Grad, Radius, Schaden, durchschlagend)."""
@@ -523,9 +613,22 @@ def weapon_for_level(level):
 # =============================================================================
 class Player:
     def __init__(self):
-        self.sprite = load_sprite("player", (PLAYER_SIZE, PLAYER_SIZE), draw_player)
-        self.icon = pygame.transform.smoothscale(self.sprite, (28, 28))
+        self.sprites = {}                  # Stufe -> Sprite (wird gecacht)
+        self.set_tier(0)
         self.reset()
+
+    def set_tier(self, tier):
+        """Wechselt die Schiff-Stufe (Größe + Aussehen). Eigene Bilder: player_1.png ... player_4.png"""
+        self.tier = tier
+        self.size = player_size(tier)
+        if tier not in self.sprites:
+            size = (self.size, self.size)
+            custom = try_asset(f"player_{tier}", size) if tier else None
+            self.sprites[tier] = custom or try_asset("player", size) or render_sprite(
+                size, lambda s, W, H: draw_player(s, W, H, tier))
+        self.sprite = self.sprites[tier]
+        self.icon = pygame.transform.smoothscale(self.sprites[0] if 0 in self.sprites else self.sprite, (28, 28))
+        self.hit_radius = PLAYER_HIT_RADIUS + PLAYER_HIT_PER_TIER * tier
 
     def reset(self):
         self.pos = Vector2(WIDTH / 2, HEIGHT - 140)
@@ -536,6 +639,7 @@ class Player:
         self.alive = True
         self.control = "keys"              # "keys" oder "mouse"
         self.t = 0.0
+        self.set_tier(0)
 
     def update(self, dt, keys, mouse_pos, mouse_ok):
         self.t += dt
@@ -554,7 +658,7 @@ class Player:
         # weiche Beschleunigung = leichte Trägheit (framerate-unabhängig)
         self.vel += (desired - self.vel) * (1 - math.exp(-PLAYER_RESPONSE * dt))
         self.pos += self.vel * dt
-        m = PLAYER_SIZE * 0.45
+        m = self.size * 0.45
         if self.pos.x < m or self.pos.x > WIDTH - m:
             self.pos.x = max(m, min(WIDTH - m, self.pos.x))
             self.vel.x = 0
@@ -566,7 +670,7 @@ class Player:
 
     def fire(self, level):
         shots, cooldown, glow = weapon_for_level(level)
-        bullets = [Bullet((self.pos.x + dx, self.pos.y - PLAYER_SIZE * 0.45),
+        bullets = [Bullet((self.pos.x + dx, self.pos.y - self.size * 0.45),
                           ang, r, dmg, pierce, glow)
                    for dx, ang, r, dmg, pierce in shots]
         return bullets, cooldown
@@ -577,11 +681,13 @@ class Player:
         x, y = self.pos.x, self.pos.y
         # Triebwerksflamme (flackert)
         flick = 0.8 + 0.3 * math.sin(self.t * 45) + random.uniform(0, 0.25)
-        base = y + PLAYER_SIZE * 0.34
-        draw_glow(surf, (x, base + 8), 30 * flick, ORANGE)
-        pygame.draw.polygon(surf, ORANGE, [(x - 9, base), (x + 9, base), (x, base + 30 * flick)])
-        pygame.draw.polygon(surf, (255, 240, 180), [(x - 4, base), (x + 4, base), (x, base + 17 * flick)])
-        draw_glow(surf, (x, y), 50, (20, 60, 120))
+        base = y + self.size * 0.34
+        k = 1 + 0.18 * self.tier                      # größere Flamme bei höherer Stufe
+        flame_c = TIER_COLORS[self.tier][2] if self.tier >= 3 else ORANGE
+        draw_glow(surf, (x, base + 8), 30 * flick * k, flame_c)
+        pygame.draw.polygon(surf, ORANGE, [(x - 9 * k, base), (x + 9 * k, base), (x, base + 30 * flick * k)])
+        pygame.draw.polygon(surf, (255, 240, 180), [(x - 4 * k, base), (x + 4 * k, base), (x, base + 17 * flick * k)])
+        draw_glow(surf, (x, y), 50 + 12 * self.tier, TIER_COLORS[self.tier][0] if self.tier else (20, 60, 120))
         surf.blit(self.sprite, self.sprite.get_rect(center=(int(x), int(y))))
 
 
@@ -601,7 +707,8 @@ class Enemy:
             self.size = spec["size"]
             self.sprite = enemy_sprite(kind, self.size)
             self.hp = spec["hp"]
-        self.hp += (level - 1) // ENEMY_HP_EVERY_N_LEVELS
+        self.hp = max(1, round(self.hp * (1 + ENEMY_HP_PER_LEVEL * (level - 1))))
+        self.fire_cd = random.uniform(0.8, 2.2)       # erster Schuss kommt nicht sofort
         self.max_hp = self.hp
         mult = min(ENEMY_SPEED_CAP, 1 + ENEMY_SPEED_PER_LEVEL * (level - 1))
         self.speed = spec["speed"] * random.uniform(0.9, 1.1) * mult
@@ -789,6 +896,10 @@ class UI:
         sub = self.f_hud.render(f"Level {game.level}  -  {weapon_name(game.level)}", True, WHITE)
         sub.set_alpha(alpha)
         surf.blit(sub, sub.get_rect(center=(cx, cy + 70)))
+        if game.banner_note:
+            note = self.f_med.render(game.banner_note, True, MAGENTA)
+            note.set_alpha(alpha)
+            surf.blit(note, note.get_rect(center=(cx, cy + 125)))
 
     # --- Bildschirme ---------------------------------------------------------------
     def draw_menu(self, surf, game, mouse_pos):
@@ -867,6 +978,8 @@ class Game:
     def reset_run(self):
         self.player.reset()
         self.enemies, self.bullets, self.particles = [], [], []
+        self.enemy_bullets = []
+        self.banner_note = ""
         self.score = 0
         self.level = 1
         self.kills_in_level = 0
@@ -974,15 +1087,15 @@ class Game:
         kind = random.choices(kinds, [ENEMY_TYPES[k]["weight"] for k in kinds])[0]
         patterns = ["single", "single", "row"] if lv == 1 else ["single", "row", "column", "v"]
         pattern = random.choice(patterns)
-        n = min(2 + lv // 3, 6)
+        n = min(2 + lv // 2, WAVE_SIZE_MAX)
         if kind == "tank":
-            n = min(n, 2)
+            n = min(n, 2 + lv // 6)
         margin = 60
         if pattern == "single":
             n = 1
         spots = []
         if pattern in ("single", "row"):
-            span = min(WIDTH - 2 * margin, 150 * n) if n > 1 else 0
+            span = min(WIDTH - 2 * margin, 120 * n) if n > 1 else 0
             cx = random.uniform(margin + span / 2, WIDTH - margin - span / 2)
             for i in range(n):
                 x = cx - span / 2 + (span * i / (n - 1) if n > 1 else 0)
@@ -991,7 +1104,7 @@ class Game:
             x = random.uniform(margin, WIDTH - margin)
             spots = [(x, -60 - i * 95) for i in range(n)]
         else:                                           # V-Formation, Anführer vorne
-            count = min(n | 1, 5)
+            count = min(n | 1, 7)
             cx = random.uniform(margin + 160, WIDTH - margin - 160)
             for i in range(count):
                 k = i - count // 2
@@ -1000,6 +1113,30 @@ class Game:
             if len(self.enemies) >= MAX_ENEMIES:
                 break
             self.enemies.append(Enemy(kind, x, y, lv, target_x=self.player.pos.x))
+
+    # --- Gegner schießen ------------------------------------------------------
+    def enemy_shoot(self, e):
+        """Feuert je nach Typ und Level; Muster siehe ENEMY_FIRE."""
+        cfg = ENEMY_FIRE[e.kind]
+        pattern = cfg["pattern"]
+        if e.kind == "grunt" and self.level >= 6:
+            pattern = "aimed"                            # Grunts zielen ab Level 6
+        aim = Vector2(0, 1)
+        if pattern != "straight" and self.player.alive:
+            to = self.player.pos - e.pos
+            if to.length_squared() > 1:
+                aim = to.normalize()
+        if pattern == "spread":
+            angles = [-18, 0, 18] if self.level < 8 else [-36, -18, 0, 18, 36]
+        else:
+            angles = [0]
+        speed = ENEMY_BULLET_SPEED * min(ENEMY_BULLET_SPEED_CAP,
+                                         1 + ENEMY_BULLET_SPEED_PER_LEVEL * (self.level - 1))
+        for a in angles:
+            if len(self.enemy_bullets) < MAX_ENEMY_BULLETS:
+                self.enemy_bullets.append(EnemyBullet(e.pos + Vector2(0, e.size * 0.3), aim.rotate(a), speed))
+        rate = min(ENEMY_FIRE_RATE_CAP, 1 + ENEMY_FIRE_RATE_PER_LEVEL * (self.level - 1))
+        e.fire_cd = cfg["cooldown"] / rate * random.uniform(0.8, 1.3)
 
     # --- Spielregeln ----------------------------------------------------------
     def kill_enemy(self, e):
@@ -1020,16 +1157,25 @@ class Game:
         self.add_flash(WHITE, 0.45)
         self.add_shake(10)
         self.sounds.play("levelup")
+        self.banner_note = ""
+        tier = player_tier(self.level)
+        if tier != self.player.tier:                   # Schiff wird größer und cooler
+            self.player.set_tier(tier)
+            self.banner_note = "SCHIFF-UPGRADE!"
+            self.add_shake(16)
+            self.explode(self.player.pos, MAGENTA, count=60, speed=560, size=7)
         for r, g in ((8, 90), (6, 160), (4, 240)):       # Schockwellen um das Schiff
             self.add_particle(Particle(self.player.pos, (0, 0), 0.7, CYAN, r, ring=True, grow=g * 2))
         self.explode(self.player.pos, YELLOW, count=40, speed=500, ring=False)
 
-    def hurt_player(self, e):
+    def hurt_player(self, pos, enemy=None):
         p = self.player
         p.lives -= 1
         p.invuln = INVULN_TIME
-        e.dead = True
-        self.explode(e.pos, ORANGE, count=24)
+        if enemy is not None:
+            enemy.dead = True
+        self.enemy_bullets.clear()                     # nach einem Treffer: kurz Luft zum Atmen
+        self.explode(pos, ORANGE, count=24)
         self.add_shake(16)
         self.add_flash(RED, 0.3)
         self.sounds.play("hit")
@@ -1060,9 +1206,14 @@ class Game:
         p = self.player
         if p.alive and p.invuln <= 0:
             for e in self.enemies:
-                if not e.dead and (e.pos - p.pos).length_squared() <= (e.radius + PLAYER_HIT_RADIUS) ** 2:
-                    self.hurt_player(e)
+                if not e.dead and (e.pos - p.pos).length_squared() <= (e.radius + p.hit_radius) ** 2:
+                    self.hurt_player(e.pos, e)
                     break
+            else:
+                for b in self.enemy_bullets:
+                    if (b.pos - p.pos).length_squared() <= (b.radius + p.hit_radius) ** 2:
+                        self.hurt_player(b.pos)
+                        break
 
     # --- Update ---------------------------------------------------------------
     def update(self, dt):
@@ -1108,15 +1259,26 @@ class Game:
 
         self.wave_timer -= dt
         if self.wave_timer <= 0:
-            self.spawn_wave()
+            for _ in range(min(WAVE_COUNT_MAX, 1 + self.level // WAVE_COUNT_PER_LEVELS)):
+                self.spawn_wave()
             self.wave_timer = max(WAVE_INTERVAL_MIN,
                                   WAVE_INTERVAL_BASE - WAVE_INTERVAL_DECAY * (self.level - 1))
 
         for b in self.bullets:
             b.update(dt)
+        for b in self.enemy_bullets:
+            b.update(dt)
         self.enemies = [e for e in self.enemies if e.update(dt) and not e.dead]
+        if p.alive:
+            for e in self.enemies:
+                cfg = ENEMY_FIRE.get(e.kind)
+                if cfg and self.level >= cfg["unlock"]:
+                    e.fire_cd -= dt
+                    if e.fire_cd <= 0 and 30 < e.pos.y < HEIGHT * 0.72:
+                        self.enemy_shoot(e)
         self.handle_collisions()
         self.bullets = [b for b in self.bullets if b.alive]
+        self.enemy_bullets = [b for b in self.enemy_bullets if b.alive]
         self.enemies = [e for e in self.enemies if not e.dead]
         self.update_world_effects(dt)
 
@@ -1127,6 +1289,8 @@ class Game:
         for e in self.enemies:
             e.draw(c)
         for b in self.bullets:
+            b.draw(c)
+        for b in self.enemy_bullets:
             b.draw(c)
         if self.player.alive and self.state != "menu":
             self.player.draw(c)
